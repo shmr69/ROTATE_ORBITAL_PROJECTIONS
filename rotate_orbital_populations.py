@@ -2,7 +2,30 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 import matplotlib
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
+import time
+import sys
+from datetime import timedelta
+
+def progressbar(it, prefix="", size=60, out=sys.stdout): 
+    """
+    measuring progress of for loops and calculating ETA
+    based on stackoverflow contribution by imbr: https://stackoverflow.com/a/34482761
+    """
+    count = len(it)
+    start = time.time() # time estimate start
+    def show(j):
+        x = int(size*j/count)
+        # time estimate calculation and string
+        remaining = ((time.time() - start) / j) * (count - j)        
+        mins, sec = divmod(remaining, 60) # limited to minutes
+        time_str = f"{int(mins):02}:{sec:03.1f}"
+        print(f"{prefix}[{u'█'*x}{('.'*(size-x))}] {j}/{count} Est wait {time_str}", end='\r', file=out, flush=True)
+    show(0.1) # avoid div/0 
+    for i, item in enumerate(it):
+        yield item
+        show(i+1)
+    print("\n", flush=True, file=out)
+
 
 def d_matrix_l2_numeric(beta):
     """Wigner small-d matrix for l=2 (m = [2,1,0,-1,-2]) using half-angle formulas."""
@@ -31,6 +54,7 @@ U_num = np.array([
     [ 1/np.sqrt(2), 0, 0, 0, 1/np.sqrt(2) ]
 ], dtype=complex)
 
+
 def D_real_numeric(alpha, beta, gamma):
     """
     Return the 5x5 real rotation matrix for l=2 in the real d-orbital basis.
@@ -46,6 +70,7 @@ def D_real_numeric(alpha, beta, gamma):
     # numerical round-off: Dr should be real orthogonal; remove tiny imag parts
     Dr = np.real_if_close(Dr, tol=1e-9)
     return np.real(Dr)
+
 
 def rotate_real_procar(P_real, alpha, beta, gamma):
     """
@@ -89,6 +114,19 @@ def get_rotation_matrix(alpha, beta, gamma):
     ])
 
 
+def rotate_populations(num_points, init_proj, alpha, beta, gamma, orbital_num, rotate_procar):
+    rotated_proj = np.zeros(shape=(num_points,num_points, num_points))
+    rotated_proj_residuals = np.zeros(shape=(num_points,num_points, num_points))
+
+    for nrow in progressbar(range(num_points),"Calculating rotated populations ", 40):
+        for ncol in range(num_points):
+            for nrot in range(num_points):
+                new_population = np.diag(rotate_procar(init_proj, alpha[nrow][ncol], beta[nrow][ncol], gamma[nrot]))
+                rotated_proj[nrow][ncol][nrot] = new_population[orbital_num]
+                rotated_proj_residuals[nrow][ncol][nrot] = np.sum(np.delete(new_population,orbital_num))
+
+    return rotated_proj, rotated_proj_residuals
+
 if __name__ == '__main__':
     
     # octahedral sites
@@ -111,7 +149,7 @@ if __name__ == '__main__':
     initial_proj_Fe16 = np.diag([0.962, 0.964, 0.961, 0.960, 0.972])
 
     # [d_xy,d_yz,d_z2,d_xz,d_x2-y2]
-    select_orbital = 4
+    select_orbital = 0
     select_init_proj = initial_proj_Fe1
     site_label = r'$\mathrm{Fe_{ohd}}$ '
     d_orbital_labels = {
@@ -122,61 +160,100 @@ if __name__ == '__main__':
         4 : r'$\mathrm{d_{x^2-y^2}}$'
     }
 
-    # number of data points for each euler angle
+    # Number of data points for each euler angle
     surface_resolution = 100
 
-    # define unit sphere
+    # Plotting parameters (elevation, azimuth, roll)
+    viewing_orientation = (12, -30, 0)
+    # d_xy: elev=12, azim=-30, roll=0, cbar left
+    # d_yz: elev=12, azim=45, roll=0, cbar right
+    # d_z^2: elev=12, azim=-30, roll=0, cbar left
+    # d_xz: elev=12, azim=45, roll=0, cbar right
+    # d_x^2-y^2: elev=12, azim=-30, roll=0, cbar left
+    cbar_location = 'left'
+
+    # Which quantity to plot on sphere surface: orbital projection [P], population residuals [M], or modified residuals [M]
+    plot_quantity = 'M'
+
+    DEBUG = True
+
+
+    # Define unit sphere
+    # TODO check if inversion symmetry can be used to only calculate upper hemisphere
     u = np.linspace(1e-6, 2 * np.pi - 1e-6, surface_resolution)
     v = np.linspace(1e-6, np.pi - 1e-6, surface_resolution)
     x = np.outer(np.cos(u), np.sin(v))
     y = np.outer(np.sin(u), np.sin(v))
     z = np.outer(np.ones(np.size(u)), np.cos(v))
     
-    # calculate euler angles for each point on sphere surface
+    # Calculate euler angles for each point on sphere surface
     alpha, beta = get_euler_angles(y,z)
-    gamma = np.deg2rad(0.0) # set gamma to zero for now
-    gamma_trial = np.linspace(0, 2 * np.pi,surface_resolution)
-    print(f'alpha range: [{np.min(np.rad2deg(alpha)):.3f}, {np.max(np.rad2deg(alpha)):.3f}]')
-    print(f'beta range: [{np.min(np.rad2deg(beta)):.3f}, {np.max(np.rad2deg(beta)):.3f}]')
-
-    rotated_proj = np.zeros(shape=(surface_resolution,surface_resolution))
-    # TODO add 3rd dimension to rotated_proj and fill with rotated projections wrt gamma_trial
-    # TODO determine projection_max_ind by looking at minimum of residuals (or residuals - new projection)
-    # TODO use this optimised gamma angle to plot the surface and find the new orientation
-
-    # for each sampling point calculate the rotated population
-    for nrow in range(surface_resolution):
-        for ncol in range(surface_resolution):
-            rotated_proj[nrow][ncol] = np.diag(rotate_real_procar(select_init_proj, alpha[nrow][ncol], beta[nrow][ncol], gamma))[select_orbital]
+    gamma = np.linspace(0, 2 * np.pi,surface_resolution)
+    print(f'alpha range: [{np.min(np.rad2deg(alpha)):.3f}, {np.max(np.rad2deg(alpha)):.3f}]', file=sys.stdout)
+    print(f'beta range: [{np.min(np.rad2deg(beta)):.3f}, {np.max(np.rad2deg(beta)):.3f}]', file=sys.stdout)
+    
+    # For each sampling point calculate the rotated population
+    loop_start = time.time()
+    rotated_proj, rotated_proj_residuals = rotate_populations(surface_resolution, select_init_proj, alpha, beta, gamma, select_orbital, rotate_real_procar)
+    loop_end = time.time()
+    if DEBUG: print(f'[DEBUG] total time for calculating new projections: {timedelta(seconds=(loop_end-loop_start))}', file=sys.stdout)
 
     
-
-    color_dimension = rotated_proj
-
     # Determine indices at which the population (i.e. projection of selected orbtal onto itself) is maximised
-    projections_max_ind = np.unravel_index(np.argmax(color_dimension, axis=None), color_dimension.shape)
-    print(f'orientation of projection extremum {color_dimension[projections_max_ind]:.5f} (in euler angles): ({np.rad2deg(alpha[projections_max_ind]):.3f}, {np.rad2deg(beta[projections_max_ind]):.3f}, {np.rad2deg(gamma):.3f})')
-    
+    opt_start = time.time()
+    projections_max_ind = np.unravel_index(np.argmax(rotated_proj, axis=None), rotated_proj.shape)
+    residuals_min_ind = np.unravel_index(np.argmin(rotated_proj_residuals, axis=None), rotated_proj_residuals.shape)
+    mod_proj_max_ind = np.unravel_index(np.argmin(rotated_proj_residuals-rotated_proj, axis=None), rotated_proj_residuals.shape)
+
+    # Find optimal rotation by maximising orbital projection
+    alpha_opt1 = np.mod(alpha[projections_max_ind[:2]], np.pi)
+    beta_opt1 = np.mod(beta[projections_max_ind[:2]],np.pi)
+    gamma_opt1 = np.mod(gamma[projections_max_ind[2]],2 * np.pi)
+    print(f'orientation of projection maximum {rotated_proj[projections_max_ind]:.5f} (in euler angles): ({np.rad2deg(alpha_opt1):.1f}, {np.rad2deg(beta_opt1):.1f}, {np.rad2deg(gamma_opt1):.1f})', np.round(np.diag(rotate_real_procar(select_init_proj, alpha_opt1, beta_opt1, gamma_opt1)), decimals=3), file=sys.stdout)
     # Get the new Z-axis wrt. initial coordinate system
-    orientation_vec = get_rotation_matrix(alpha[projections_max_ind], beta[projections_max_ind], gamma) @ np.array([0,0,1])
-    print('new z axis of projection extremum: ', np.round(orientation_vec, decimals=2))
+    orientation_vec1 = get_rotation_matrix(alpha_opt1, beta_opt1, gamma_opt1) @ np.array([0,0,1])
+    print('new z axis: ', np.round(orientation_vec1, decimals=2), file=sys.stdout)
 
-    # For the optimised (wrt. alpha and beta) population check which angle gamma minimises the projection residuals 
-    new_populations = np.zeros(shape=(len(gamma_trial),5))
-    residuals = np.zeros(len(gamma_trial))
-    for i,g in enumerate(gamma_trial):
-        new_pop = np.round(np.diag(rotate_real_procar(select_init_proj, alpha[projections_max_ind], beta[projections_max_ind], g)), decimals=3)
-        resid = np.sum(np.delete(new_pop,select_orbital))
-        new_populations[i] = new_pop
-        residuals[i] = resid
-        #print(f'new populations (gamma = {np.rad2deg(g):.1f}): ', new_pop, f'R={resid:.3f}')
+    # Find optimal rotation by minimising residuals
+    alpha_opt2 = np.mod(alpha[residuals_min_ind[:2]], np.pi)
+    beta_opt2 = np.mod(beta[residuals_min_ind[:2]], np.pi)
+    gamma_opt2 = np.mod(gamma[residuals_min_ind[2]],2 * np.pi)
+    print(f'orientation of residual minimum {rotated_proj_residuals[residuals_min_ind]:.5f} (in euler angles): ({np.rad2deg(alpha_opt2):.1f}, {np.rad2deg(beta_opt2):.1f}, {np.rad2deg(gamma_opt2):.1f})', np.round(np.diag(rotate_real_procar(select_init_proj, alpha_opt2, beta_opt2, gamma_opt2)), decimals=3), file=sys.stdout)
+    # Get the new Z-axis wrt. initial coordinate system
+    orientation_vec2 = get_rotation_matrix(alpha_opt2, beta_opt2, gamma_opt2) @ np.array([0,0,1])
+    print('new z axis: ', np.round(orientation_vec2, decimals=2), file=sys.stdout)
 
-    min_resid_population = new_populations[np.argmin(residuals)]
-    print('Population that minimises residuals: ', min_resid_population, f'gamma={np.rad2deg(gamma_trial[np.argmin(residuals)]):.2f}, R={residuals[np.argmin(residuals)]:.3f}')
-
+    # Find optimal projection by minimising (residuals - projection)
+    alpha_opt3 = np.mod(alpha[mod_proj_max_ind[:2]], np.pi)
+    beta_opt3 = np.mod(beta[mod_proj_max_ind[:2]], np.pi)
+    gamma_opt3 = np.mod(gamma[mod_proj_max_ind[2]],2 * np.pi)
+    print(f'orientation of residuals-projection minimum {(rotated_proj_residuals-rotated_proj)[mod_proj_max_ind]:.5f} (in euler angles): ({np.rad2deg(alpha_opt3):.1f}, {np.rad2deg(beta_opt3):.1f}, {np.rad2deg(gamma_opt3):.1f})', np.round(np.diag(rotate_real_procar(select_init_proj, alpha_opt3, beta_opt3, gamma_opt3)), decimals=3), file=sys.stdout)
+    orientation_vec3 = get_rotation_matrix(alpha_opt3, beta_opt3, gamma_opt3) @ np.array([0,0,1])
+    print('new z axis: ', np.round(orientation_vec3, decimals=2), file=sys.stdout)
+    
+    opt_end = time.time()
+    if DEBUG: print(f'[DEBUG] total time for finding optimum orbital orientation: {timedelta(seconds=(opt_end-opt_start))}', file=sys.stdout)
+    
     # Plot the population of the selected rotated orbital on a spherical surface
+    plot_start = time.time()
+    if plot_quantity == 'P':
+        color_dimension = rotated_proj[:][:][projections_max_ind[2]]
+        orientation_vec = orientation_vec1
+        gamma_opt = gamma_opt1
+        cbar_label = rf'$|\langle Y_{{2,{select_orbital-2}}}^{{\alpha}} | \phi_{{n\bf{{k}}}} \rangle |^2$'
+    elif plot_quantity == 'R':
+        color_dimension = rotated_proj_residuals[:][:][residuals_min_ind[2]]
+        orientation_vec = orientation_vec2
+        gamma_opt = gamma_opt2
+        cbar_label = rf'$\sum_{{m \neq {select_orbital-2}}}|\langle Y_{{2,m}}^{{\alpha}} | \phi_{{n\bf{{k}}}} \rangle |^2$'
+    elif plot_quantity == 'M':
+        color_dimension = (rotated_proj_residuals-rotated_proj)[:][:][mod_proj_max_ind[2]]
+        orientation_vec = orientation_vec3
+        gamma_opt = gamma_opt3
+        cbar_label = rf'$\sum_{{m \neq {select_orbital-2}}}|\langle Y_{{2,m}}^{{\alpha}} | \phi_{{n\bf{{k}}}} \rangle |^2 - |\langle Y_{{2,{select_orbital-2}}}^{{\alpha}} | \phi_{{n\bf{{k}}}} \rangle |^2$'
+
     minn, maxx = color_dimension.min(), color_dimension.max()
-    print(f'projection numbers range: {minn:.5f}, {maxx:.5f}')
+    print(f'projection numbers range for plotting: {minn:.5f}, {maxx:.5f}', file=sys.stdout)
     norm = matplotlib.colors.Normalize(minn, maxx)
     m = plt.cm.ScalarMappable(norm=norm, cmap='jet')
     m.set_array([])
@@ -184,14 +261,20 @@ if __name__ == '__main__':
 
     fig, ax = plt.subplots(subplot_kw={'projection': '3d'})
 
+    # Set the viewing orientation
+    ax.view_init(elev = viewing_orientation[0], 
+                 azim = viewing_orientation[1], 
+                 roll = viewing_orientation[2])
+
     # Plot the surface
     ax.plot_surface(x, y, z, rstride=1, cstride=1, facecolors=fcolors, vmin=minn, vmax=maxx, shade=False)
-    ax.set_xlabel('x')
+    ax.set_xlabel('x', labelpad=0.00001)
     ax.set_xticklabels([])
-    ax.set_ylabel('y')
+    ax.set_ylabel('y', labelpad=0.00001)
     ax.set_yticklabels([])
-    ax.set_zlabel('z')
+    ax.set_zlabel('z', labelpad=0.00001)
     ax.set_zticklabels([])
+
 
     # plot the new Z'' axis as an arrow 
     ax.quiver(
@@ -200,14 +283,18 @@ if __name__ == '__main__':
     color = 'black', alpha = .8, lw = 2, arrow_length_ratio=0.05
     )
 
-    fig.colorbar(m, shrink=0.5, aspect=7, ax=ax, label=rf'$|\langle Y_{{2,{select_orbital-2}}}^{{\alpha}} | \phi_{{n\bf{{k}}}} \rangle |^2$', pad=0.005)
+    fig.colorbar(m, 
+                 shrink=0.6, 
+                 aspect=10, 
+                 ax=ax, 
+                 label=cbar_label, 
+                 pad=0.01, 
+                 location=cbar_location)
     ax.set_aspect('equal')
-    ax.set_title(site_label + d_orbital_labels[select_orbital] + '-projection' + '\n' + rf"$z'=({orientation_vec[0]:.1f},{orientation_vec[1]:.1f},{orientation_vec[2]:.1f})$", y=0.93)
-    #plt.subplots_adjust(top=0.8)
-
-    # set the voewing orientation
-    ax.view_init(elev=12, azim=65, roll=0)
+    ax.set_title(site_label + d_orbital_labels[select_orbital] + '-projection' + '\n' + rf"$z'=({orientation_vec[0]:.1f},{orientation_vec[1]:.1f},{orientation_vec[2]:.1f})$ ($\gamma = {np.rad2deg(gamma_opt):.1f}^{{\circ}}$)", y=0.95)
     
-    #plt.savefig('Fe1_dx2-y2_rotations.png', dpi=400)
+    #plt.savefig('Fe1_dxy_rotations.png', dpi=400)
+    plot_end = time.time()
+    if DEBUG: print(f'[DEBUG] total time for plotting: {timedelta(seconds=(plot_end-plot_start))}', file=sys.stdout)
     plt.show()
 
