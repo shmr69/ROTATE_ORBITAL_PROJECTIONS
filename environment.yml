@@ -1,0 +1,12 @@
+name: orbital-rotation
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.9
+  - numpy>=1.21
+  - scipy>=1.8
+  - numba>=0.55
+  - matplotlib>=3.5
+  - tqdm>=4.62
+  - pip

@@ -1,7 +1,6 @@
 import os
-os.environ["OMP_NUM_THREADS"] = "32"
+os.environ["OMP_NUM_THREADS"] = "1"
 import numpy as np
-from scipy.spatial.transform import Rotation as R
 import matplotlib
 import matplotlib.pyplot as plt
 import time
@@ -25,11 +24,6 @@ def d_matrix_l2_numeric(beta):
         [2*c*s**3, s**2*(2*s**2-1), np.sqrt(3/2)*np.sin(beta)*np.cos(beta), c**2*(1-2*c**2), 2*c**3*s],
         [s**4, 2*c*s**3, np.sqrt(6)*c**2*s**2, 2*c**3*s, c**4]
     ], dtype=float)
-
-# ----- 2. Wigner D^l using scipy -----
-def wigner_D_l2(alpha, beta, gamma):
-    """Return complex 5x5 Wigner D^2 matrix in |m=2..-2> basis."""
-    return R.from_euler('zyz', [alpha, beta, gamma]).as_matrix(l=2)  # needs SciPy >=1.8
 
 
 # complex <-> real basis unitary (rows are real orbitals in order: d_xy,d_yz,d_z2,d_xz,d_x2-y2) using Condon-Shortley phase convention

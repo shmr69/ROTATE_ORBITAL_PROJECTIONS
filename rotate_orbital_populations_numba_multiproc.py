@@ -1,11 +1,5 @@
-# Refactored script: Numba-accelerated inner kernel + multiprocessing outer parallelism
-# - Uses numba.njit to compile the heavy inner computation
-# - Distributes outer loop (rows) across processes with multiprocessing
-# - Main process shows a tqdm progress bar updated as worker results arrive
-# - Assumes SLURM_CPUS_PER_TASK is set (use --cpus-per-task=32 in your sbatch)
-
 import os
-os.environ.setdefault("OMP_NUM_THREADS", "1")  # ensure BLAS/OpenMP libs don't oversubscribe
+os.environ.setdefault("OMP_NUM_THREADS", "1")  # ensure BLAS/OpenMP libs don't oversubscribe!
 
 import numpy as np
 import matplotlib
@@ -17,8 +11,7 @@ from datetime import timedelta
 import multiprocessing as mp
 from numba import njit
 
-# ---------------- numba-compiled helpers -----------------
-# Complex U_num matrix (Condon-Shortley phase conv.)
+# complex <-> real basis unitary (rows are real orbitals in order: d_xy,d_yz,d_z2,d_xz,d_x2-y2) using Condon-Shortley phase convention
 U_num = np.array([
     [ 1j/np.sqrt(2), 0, 0, 0, -1j/np.sqrt(2) ],
     [ 0, 1j/np.sqrt(2), 0, 1j/np.sqrt(2), 0 ],
@@ -27,11 +20,16 @@ U_num = np.array([
     [ 1/np.sqrt(2), 0, 0, 0, 1/np.sqrt(2) ]
 ], dtype=np.complex128)
 
-# Numba doesn't accept global typed complex arrays directly in njit unless they are passed in.
-# We'll pass U_num into the compiled functions when needed.
-
+# ---------------- numba-compiled helpers -----------------
 @njit(fastmath=True)
 def d_matrix_l2_numeric_nb(beta):
+    """
+    Wigner small d-matrix for l=2 (m = [2,1,0,-1,-2]) using half-angle formulas.
+
+    beta: Euler angle in radians, Z(alpha)-Y(beta)-Z(gamma) convention.
+
+    returns: full Wigner small d-matrix for given beta
+    """
     c = np.cos(beta/2.0)
     s = np.sin(beta/2.0)
     out = np.empty((5,5), dtype=np.float64)
@@ -69,8 +67,11 @@ def d_matrix_l2_numeric_nb(beta):
 @njit(fastmath=True)
 def D_complex_from_euler_nb(alpha, beta, gamma):
     """
-    Build complex Wigner D (5x5) in |m=2..-2> basis using d_matrix and e^{ - i m alpha } phases.
-    Returns complex128 5x5.
+    Build complex Wigner D (5x5) in |m=2..-2> basis using d_matrix and e^{ - i m alpha } and e^{ - i m gamma } phases.
+
+    alpha, beta, gamma: Euler angles in radians, Z(alpha)-Y(beta)-Z(gamma) convention.
+
+    Returns full Wigner D-matrix as complex128 5x5 array.
     """
     m = np.array([2.0,1.0,0.0,-1.0,-2.0], dtype=np.float64)
     exp_alpha = np.empty(5, dtype=np.complex128)
@@ -88,8 +89,12 @@ def D_complex_from_euler_nb(alpha, beta, gamma):
 @njit(fastmath=True)
 def D_real_numeric_nb(alpha, beta, gamma, Uflat):
     """
-    Compute the 5x5 real rotation matrix in the real d-orbital basis.
-    Uflat is a flattened (25,) complex128 array representing U_num in row-major form.
+    Compute the 5x5 real Wigner D-matrix for l=2 in the real d-orbital basis.
+
+    alpha, beta, gamma: Euler angles in radians, Z(alpha)-Y(beta)-Z(gamma) convention.
+    Uflat: flattened (25,) complex128 array representing U_num in row-major form.
+
+    returns full Wigner D-matrix as real 5x5 array
     """
     # reconstruct U_num from Uflat
     U = np.empty((5,5), dtype=np.complex128)
@@ -123,6 +128,8 @@ def D_real_numeric_nb(alpha, beta, gamma, Uflat):
 @njit(fastmath=True)
 def compute_row_numba(nrow, num_points, init_proj_diag, alpha, beta, gamma, orbital_num, Uflat):
     """
+    helper function for parallelising the rotation of population
+
     Compute one row (nrow) of rotated_proj and rotated_proj_residuals.
     init_proj_diag: shape (5,) diagonal elements of initial projection P
     alpha, beta: 2D arrays shape (num_points,num_points)
@@ -135,7 +142,7 @@ def compute_row_numba(nrow, num_points, init_proj_diag, alpha, beta, gamma, orbi
 
     # temporary matrices
     Dr = np.empty((5,5), dtype=np.float64)
-    # We'll exploit that init_proj is diagonal: P_{ij} = init_proj_diag[i] if i==j else 0
+    # exploit that init_proj is diagonal: P_{ij} = init_proj_diag[i] if i==j else 0
 
     for ncol in range(num_points):
         a = alpha[nrow, ncol]
@@ -145,7 +152,7 @@ def compute_row_numba(nrow, num_points, init_proj_diag, alpha, beta, gamma, orbi
             # compute rotation matrix
             Dr = D_real_numeric_nb(a, b, g, Uflat)
             # compute M = Dr @ P @ Dr.T, with P diagonal -> M_{ij} = sum_k Dr[i,k] * init_proj_diag[k] * Dr[j,k]
-            # we only need diagonal elements M_ii
+            # only need diagonal elements M_ii
             diagM = np.zeros(5, dtype=np.float64)
             for i in range(5):
                 s = 0.0
@@ -173,11 +180,19 @@ def compute_row_worker(args):
 # ---------------- original helper functions kept for plotting & IO -----------------
 
 def get_euler_angles(z2, z3):
+    """
+    For a given rotated frame evaluate proper Euler angles using ZYZ convention (ignoring gamma rotation, i.e. rotation about new Z'' axis) 
+    Inputs:
+      - z2, z3: y and z coordinates of  rotated z axis in original frame
+    """
     alpha = np.arccos(z2/np.sqrt(1-z3**2))
     beta = np.arccos(z3)
     return (alpha,beta)
 
 def get_rotation_matrix(alpha, beta, gamma):
+    """
+    Euler angles alpha,beta,gamma in radians, Z(alpha)-Y(beta)-Z(gamma) convention.
+    """
     ca = np.cos(alpha)
     cb = np.cos(beta)
     cc = np.cos(gamma)
@@ -194,8 +209,9 @@ def rotate_real_procar(P_real, alpha, beta, gamma, Uflat):
     """
     Rotate a 5x5 PROCAR projection matrix given in the real d-orbital basis.
     Inputs:
-      - P_real: (5,5) array-like real projection matrix in order [d_xy,d_yz,d_z2,d_xz,d_x2-y2]
+      - P_real: (5,5) diagonal real projection matrix in order [d_xy,d_yz,d_z2,d_xz,d_x2-y2]
       - alpha,beta,gamma: Euler angles in radians (Z(alpha)-Y(beta)-Z(gamma) convention)
+      - Uflat: flattened (25,) complex128 array representing U_num in row-major form.
     Returns:
       - P_rot: rotated (5,5) real matrix = D_real @ P_real @ D_real.T
     """
